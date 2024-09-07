@@ -279,7 +279,30 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        let read_state = self.state.read();
+        let snapshot = &read_state;
+
+        // 在当前的 memtable 中查找
+        if let Some(value) = snapshot.memtable.get(_key) {
+            if value.is_empty() {
+                // 说明找到的是这个 key 的 tome stone
+                return Ok(None);
+            }
+            return Ok(Some(value));
+        }
+
+        // 在 immutable memtables 中查找
+        for memtable in snapshot.imm_memtables.iter() {
+            if let Some(value) = memtable.get(_key) {
+                if value.is_empty() {
+                    // 说明找到的是这个 key 的 tome stone
+                    return Ok(None);
+                }
+                return Ok(Some(value));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -289,12 +312,65 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+        assert!(!_value.is_empty(), "value cannot be empty");
+        assert!(!_key.is_empty(), "key cannot be empty");
+
+        let size;
+        {
+            let guard = self.state.read();
+            guard.memtable.put(_key, _value)?;
+            size = guard.memtable.approximate_size();
+        }
+
+        self.try_freeze(size)?;
+
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+        assert!(!_key.is_empty(), "key cannot be empty");
+
+        let size;
+        {
+            let guard = self.state.read();
+            guard.memtable.put(_key, b"")?;
+            size = guard.memtable.approximate_size();
+        }
+
+        self.try_freeze(size)?;
+
+        Ok(())
+    }
+
+    // try_freeze 方法的作用是根据内存表的大小判断是否需要冻结当前的内存表。
+    /*
+    具体操作：
+    检查大小是否超过阈值：
+
+    首先判断 estimated_size 是否超过了系统配置中的 target_sst_size。如果当前内存表的估计大小大于或等于这个目标值，就可能需要冻结。
+    加锁和再次确认：
+
+    获取全局锁 self.state_lock.lock()，确保冻结操作的独占性。
+    再次获取读锁 self.state.read()，并检查当前内存表的实际大小是否仍然大于阈值（防止其他线程已经处理过冻结操作）。
+    执行冻结：
+
+    如果内存表的大小确实超过了阈值，释放读锁（drop(guard)），然后调用 self.force_freeze_memtable(&state_lock) 执行内存表的冻结操作。
+    总结：
+    该方法是一个保护机制，用于确保内存表不会超过目标大小。如果内存表过大，会触发冻结操作，保证性能和内存占用在合理范围内。
+     */
+    fn try_freeze(&self, estimated_size: usize) -> Result<()> {
+        if estimated_size >= self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            let guard = self.state.read();
+            // the memtable could have already been frozen, check again to ensure we really need to freeze
+            if guard.memtable.approximate_size() >= self.options.target_sst_size {
+                // drop(guard) 是用于显式释放读锁，确保接下来调用 force_freeze_memtable 时可以顺利获取到写锁，避免死锁或锁竞争。
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -318,8 +394,29 @@ impl LsmStorageInner {
     }
 
     /// Force freeze the current memtable to an immutable memtable
+    /// 该方法的核心功能是将当前的可变内存表（memtable）冻结，并且用一个新的内存表替换它。
+    /// 旧的内存表被插入到不可变内存表（imm_memtables）中，表明它已经准备好进行下一步处理（例如持久化或合并）。
+    /// 这个操作通常在内存表达到某个大小阈值或其他条件时触发。
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        // 创建一个新的 memtable
+        let memtable_id = self.next_sst_id();
+        let memtable = Arc::new(MemTable::create(memtable_id));
+
+        // 这里使用了一个代码块 {}，这个块主要是为了控制作用域，确保 state.write() 的锁只在这个块内生效。
+        let old_memtable;
+        {
+            let mut guard = self.state.write();
+            // Swap the current memtable with a new one. 获取当前状态的快照并克隆一份，目的是为了在更改之前先复制当前状态。
+            let mut snapshot = guard.as_ref().clone();
+            // 使用 std::mem::replace 将当前的可变内存表替换为新的内存表，并将旧的内存表保存到 old_memtable 中
+            old_memtable = std::mem::replace(&mut snapshot.memtable, memtable);
+            // Add the memtable to the immutable memtables.
+            snapshot.imm_memtables.insert(0, old_memtable.clone());
+            // Update the snapshot.最后，将更新后的快照重新存回 state 中，确保状态变更正确。
+            *guard = Arc::new(snapshot);
+        }
+
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
