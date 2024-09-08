@@ -2,6 +2,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::cmp::{self};
+use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
 
 use anyhow::Result;
@@ -45,7 +46,35 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        if iters.is_empty() {
+            return Self {
+                iters: BinaryHeap::new(),
+                current: None,
+            };
+        }
+
+        let mut heap = BinaryHeap::new();
+
+        if iters.iter().all(|x| !x.is_valid()) {
+            // All invalid, select the last one as the current.
+            let mut iters = iters;
+            return Self {
+                iters: heap,
+                current: Some(HeapWrapper(0, iters.pop().unwrap())),
+            };
+        }
+
+        for (idx, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                heap.push(HeapWrapper(idx, iter));
+            }
+        }
+
+        let current = heap.pop().unwrap();
+        Self {
+            iters: heap,
+            current: Some(current),
+        }
     }
 }
 
@@ -55,18 +84,65 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .map(|x| x.1.is_valid())
+            .unwrap_or(false)
     }
 
+    // todo 这个代码没看懂
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current = self.current.as_mut().unwrap();
+        // Pop the item out of the heap if they have the same value.
+        while let Some(mut inner_iter) = self.iters.peek_mut() {
+            debug_assert!(
+                inner_iter.1.key() >= current.1.key(),
+                "heap invariant violated"
+            );
+            // 如果当前迭代器的 key 与堆顶迭代器的 key 相等，那么调用 next 方法
+            if inner_iter.1.key() == current.1.key() {
+                // Case 1: an error occurred when calling `next`.
+                if let e @ Err(_) = inner_iter.1.next() {
+                    // 报错的话，会将堆顶迭代器弹出，然后返回错误
+                    PeekMut::pop(inner_iter);
+                    return e;
+                }
+
+                // Case 2: iter is no longer valid.
+                if !inner_iter.1.is_valid() {
+                    PeekMut::pop(inner_iter);
+                }
+            } else {
+                break;
+            }
+        }
+
+        // 下一个元素是当前迭代器的下一个元素
+        current.1.next()?;
+
+        // If the current iterator is invalid, pop it out of the heap and select the next one.
+        if !current.1.is_valid() {
+            if let Some(iter) = self.iters.pop() {
+                *current = iter;
+            }
+            return Ok(());
+        }
+
+        // Otherwise, compare with heap top and swap if necessary.
+        if let Some(mut inner_iter) = self.iters.peek_mut() {
+            if *current < *inner_iter {
+                std::mem::swap(&mut *inner_iter, current);
+            }
+        }
+
+        Ok(())
     }
 }
