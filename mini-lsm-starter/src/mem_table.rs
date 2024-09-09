@@ -145,16 +145,19 @@ type SkipMapRangeIter<'a> =
 #[self_referencing]
 pub struct MemTableIterator {
     /// Stores a reference to the skipmap.
+    /// 也是为了保证迭代器的生命周期不会超过 skipmap 的生命周期
     map: Arc<SkipMap<Bytes, Bytes>>,
     /// Stores a skipmap iterator that refers to the lifetime of `MemTableIterator` itself.
     #[borrows(map)]
     #[not_covariant]
+    /// 这是 skipmap 范围查询的迭代器
     iter: SkipMapRangeIter<'this>,
     /// Stores the current key-value pair.
     item: (Bytes, Bytes),
 }
 
 impl MemTableIterator {
+    // 这个函数是为了将 skipmap 的 entry 转换为 key-value pair
     fn entry_to_item(entry: Option<Entry<'_, Bytes, Bytes>>) -> (Bytes, Bytes) {
         entry
             .map(|x| (x.key().clone(), x.value().clone()))
@@ -179,7 +182,9 @@ impl StorageIterator for MemTableIterator {
     }
 
     fn next(&mut self) -> Result<()> {
+        // 通过 with_iter_mut 函数获取到skipmap迭代器的引用，然后调用 next 函数
         let entry = self.with_iter_mut(|iter| MemTableIterator::entry_to_item(iter.next()));
+        // 通过 with_mut 函数获取到 MemTableIterator 的引用，然后将 entry 赋值给 item
         self.with_mut(|x| *x.item = entry);
         Ok(())
     }

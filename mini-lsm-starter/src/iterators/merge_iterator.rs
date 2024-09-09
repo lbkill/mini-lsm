@@ -11,8 +11,12 @@ use crate::key::KeySlice;
 
 use super::StorageIterator;
 
+/// HeapWrapper<I> 是一个泛型元组结构体，用于封装实现了 StorageIterator 的迭代器 I，
+/// 同时它还有一个 usize 字段，用来存储与迭代器相关的索引、优先级或计数器。
+// Box<I> 使得这个结构体可以动态分配迭代器，并封装不同类型的 StorageIterator 实现。
 struct HeapWrapper<I: StorageIterator>(pub usize, pub Box<I>);
 
+/// 实现 HeapWrapper 的 PartialEq、Eq、PartialOrd 和 Ord trait，用于比较两个 HeapWrapper 实例。
 impl<I: StorageIterator> PartialEq for HeapWrapper<I> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == cmp::Ordering::Equal
@@ -27,6 +31,8 @@ impl<I: StorageIterator> PartialOrd for HeapWrapper<I> {
     }
 }
 
+/// 优先级队列的比较规则是：首先比较 key，然后比较 HeapWrapper 的 usize 字段。
+/// 默认是升序，这里使用 reverse() 方法将其改为降序。就是最小堆。就是说
 impl<I: StorageIterator> Ord for HeapWrapper<I> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.1
@@ -39,6 +45,10 @@ impl<I: StorageIterator> Ord for HeapWrapper<I> {
 
 /// Merge multiple iterators of the same type. If the same key occurs multiple times in some
 /// iterators, prefer the one with smaller index.
+/// 为什么需要 MergeIterator ？
+/// 1. 为了合并多个迭代器，这样可以将多个迭代器的结果合并成一个有序的迭代器。
+/// 2. 为了避免重复的 key，如果多个迭代器中有相同的 key，那么只保留一个。
+/// 3. 这样将局部有序的迭代器合并成一个全局有序的迭代器。
 pub struct MergeIterator<I: StorageIterator> {
     iters: BinaryHeap<HeapWrapper<I>>,
     current: Option<HeapWrapper<I>>,
@@ -46,6 +56,7 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
+        // 如果迭代器列表为空，直接返回一个空的 MergeIterator
         if iters.is_empty() {
             return Self {
                 iters: BinaryHeap::new(),
@@ -53,8 +64,10 @@ impl<I: StorageIterator> MergeIterator<I> {
             };
         }
 
+        // 创建一个堆
         let mut heap = BinaryHeap::new();
 
+        // 如果所有迭代器当前item都是无效的，那么选择最后一个作为当前迭代器
         if iters.iter().all(|x| !x.is_valid()) {
             // All invalid, select the last one as the current.
             let mut iters = iters;
@@ -64,12 +77,14 @@ impl<I: StorageIterator> MergeIterator<I> {
             };
         }
 
+        // 选择迭代器元素是有效的迭代器加入到堆中
         for (idx, iter) in iters.into_iter().enumerate() {
             if iter.is_valid() {
                 heap.push(HeapWrapper(idx, iter));
             }
         }
 
+        // 选择堆顶元素作为当前迭代器
         let current = heap.pop().unwrap();
         Self {
             iters: heap,
@@ -98,7 +113,6 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             .unwrap_or(false)
     }
 
-    // todo 这个代码没看懂
     fn next(&mut self) -> Result<()> {
         let current = self.current.as_mut().unwrap();
         // Pop the item out of the heap if they have the same value.
