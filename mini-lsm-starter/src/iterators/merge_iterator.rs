@@ -116,12 +116,14 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     fn next(&mut self) -> Result<()> {
         let current = self.current.as_mut().unwrap();
         // Pop the item out of the heap if they have the same value.
+        // 堆顶元素的 key 与当前迭代器的 key 进行比较
         while let Some(mut inner_iter) = self.iters.peek_mut() {
             debug_assert!(
                 inner_iter.1.key() >= current.1.key(),
                 "heap invariant violated"
             );
-            // 如果当前迭代器的 key 与堆顶迭代器的 key 相等，那么调用 next 方法
+            // 如果当前迭代器的 key 与堆顶迭代器的 key 相等，那么调用 next 方法，跳过这个 key
+            // 如果 next 方法返回错误，那么将堆顶迭代器弹出，然后返回错误
             if inner_iter.1.key() == current.1.key() {
                 // Case 1: an error occurred when calling `next`.
                 if let e @ Err(_) = inner_iter.1.next() {
@@ -139,20 +141,32 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             }
         }
 
-        // 下一个元素是当前迭代器的下一个元素
+        // 将 current 迭代器前进到下一个元素
         current.1.next()?;
 
         // If the current iterator is invalid, pop it out of the heap and select the next one.
+        // 检查 current 是否仍然有效：如果 current 迭代器已经无效（即没有剩余元素），需要从堆中弹出下一个迭代器，作为新的 current。
         if !current.1.is_valid() {
+            // 从堆中弹出堆顶元素，即堆中当前键值最小的迭代器
             if let Some(iter) = self.iters.pop() {
+                // 将堆中弹出的迭代器替换当前的 current。
                 *current = iter;
             }
+            // 如果 current 已经无效且堆为空，说明所有迭代器都已经处理完，函数返回 Ok(())。
             return Ok(());
         }
 
         // Otherwise, compare with heap top and swap if necessary.
+        // 目的：在 current 有效的情况下，比较 current 和堆顶迭代器，确保堆的有序性。如果 current 比堆顶大，交换它们的位置，以保持堆顶是最小元素。
         if let Some(mut inner_iter) = self.iters.peek_mut() {
+            // 比较当前的 current 迭代器和堆顶的迭代器。如果 current 比堆顶大，意味着堆的有序性被破坏，因此需要交换它们的位置。
+            // 解引用 *current 和 *inner_iter：current 和 inner_iter 是 HeapWrapper<I> 类型的实例。*current 和 *inner_iter 是通过解引用获得实际的 HeapWrapper<I> 值。
+            // 比较 current 和 inner_iter：
+            // current 和 inner_iter 都是 HeapWrapper<I> 类型，HeapWrapper<I> 实现了 Ord trait，因此可以进行大小比较。
+            // 比较的核心逻辑是在之前 Ord 实现中定义的：首先比较它们内部的 StorageIterator 键（即 key() 返回的值），然后根据键的大小决定比较结果。
+            // 如果 current 中的键值比 inner_iter 中的键值大，则条件为 true，表示 current 并不比堆顶的元素小，违反了堆的性质，此时需要交换 current 和堆顶的元素。
             if *current < *inner_iter {
+                // 交换 current 和堆顶的 inner_iter，以确保 current 始终是最小的迭代器。
                 std::mem::swap(&mut *inner_iter, current);
             }
         }
