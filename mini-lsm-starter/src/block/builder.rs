@@ -1,9 +1,10 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use bytes::BufMut;
 use crate::key::{KeySlice, KeyVec};
 
-use super::Block;
+use super::{Block, SIZEOF_U16};
 
 /// Builds a block.
 pub struct BlockBuilder {
@@ -28,28 +29,30 @@ impl BlockBuilder {
         }
     }
 
+    fn estimated_size(&self) -> usize {
+        SIZEOF_U16 /* number of key-value pairs in the block */
+            +  self.offsets.len() * SIZEOF_U16 /* offsets */
+            + self.data.len() // key-value pairs
+    }
+
     /// Adds a key-value pair to the block. Returns false when the block is full.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        // Calculate the total size required to add the key-value pair
-        let key_len = key.len() as u16;
-        let value_len = value.len() as u16;
-        let entry_size = 2 + key_len as usize + 2 + value_len as usize; // 2B key_len + key + 2B value_len + value
-
-        // Check if adding this entry would exceed block_size
-        if self.data.len() + entry_size > self.block_size {
+        assert!(!key.is_empty(), "key must not be empty");
+        if self.estimated_size() + key.len() + value.len() + SIZEOF_U16 * 3 /* key_len, value_len and offset */ > self.block_size
+            && !self.is_empty() {
             return false;
         }
-
-        // Record the offset of this entry (which is the current length of data)
+        // Add the offset of the data into the offset array.
         self.offsets.push(self.data.len() as u16);
-
-        // Append key_len, key, value_len, value to the data
-        self.data.extend_from_slice(&key_len.to_le_bytes());
-        self.data.extend_from_slice(key.raw_ref());
-        self.data.extend_from_slice(&value_len.to_le_bytes());
-        self.data.extend_from_slice(value);
-
+        // Encode key length.
+        self.data.put_u16(key.len() as u16);
+        // Encode key content.
+        self.data.put(key.raw_ref());
+        // Encode value length.
+        self.data.put_u16(value.len() as u16);
+        // Encode value content.
+        self.data.put(value);
         true
     }
 
