@@ -30,6 +30,38 @@ pub struct BlockMeta {
     pub last_key: KeyBytes,
 }
 
+// +-----------------------------+
+// | Number of BlockMeta Entries  | 4 bytes (u32)
+// +-----------------------------+
+// |         BlockMeta #1         |
+// +-----------------------------+
+// |        Offset (u32)          | 4 bytes
+// +-----------------------------+
+// |   First Key Length (u16)     | 2 bytes
+// +-----------------------------+
+// |       First Key Data         | variable (depends on First Key Length)
+// +-----------------------------+
+// |   Last Key Length (u16)      | 2 bytes
+// +-----------------------------+
+// |       Last Key Data          | variable (depends on Last Key Length)
+// +-----------------------------+
+// |         BlockMeta #2         |
+// +-----------------------------+
+// |        Offset (u32)          | 4 bytes
+// +-----------------------------+
+// |   First Key Length (u16)     | 2 bytes
+// +-----------------------------+
+// |       First Key Data         | variable
+// +-----------------------------+
+// |   Last Key Length (u16)      | 2 bytes
+// +-----------------------------+
+// |       Last Key Data          | variable
+// +-----------------------------+
+// |            ...               | Repeat for each BlockMeta
+// +-----------------------------+
+// |         CRC32 Checksum       | 4 bytes (u32)
+// +-----------------------------+
+
 impl BlockMeta {
     /// Encode block meta to a buffer.
     /// You may add extra fields to the buffer,
@@ -54,18 +86,30 @@ impl BlockMeta {
         estimated_size += size_of::<u32>();
         // Reserve the space to improve performance, especially when the size of incoming data is
         // large
+        // 预先分配空间，避免多次扩容
         buf.reserve(estimated_size);
+        // The original length of the buffer
+        // 这里是可以看做记录 buf 的起始位置
         let original_len = buf.len();
+        // The number of block meta
         buf.put_u32(block_meta.len() as u32);
+        // Encode each block meta
         for meta in block_meta {
+            // The offset of the block
             buf.put_u32(meta.offset as u32);
+            // The length of the first key
             buf.put_u16(meta.first_key.len() as u16);
+            // The actual first key
             buf.put_slice(meta.first_key.raw_ref());
+            // The length of the last key
             buf.put_u16(meta.last_key.len() as u16);
+            // The actual last key
             buf.put_slice(meta.last_key.raw_ref());
         }
         // Calculate the CRC32 checksum of the buffer
-        // 怎么计算的？
+        // 用于验证整个 BlockMeta 数据的完整性
+        // original_len + 4 表示从 BlockMeta 的数量开始计算，跳过记录 BlockMeta 数量的位置。确保在计算 CRC32 时，校验的只是数据本身，而不是包含元数据的前导部分。
+        // 这样就可以计算出 BlockMeta 数据的 CRC32 校验和
         buf.put_u32(crc32fast::hash(&buf[original_len + 4..]));
         assert_eq!(estimated_size, buf.len() - original_len);
     }
@@ -73,7 +117,9 @@ impl BlockMeta {
     /// Decode block meta from a buffer.
     pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
         let mut block_meta = Vec::new();
+        // The number of block meta
         let num = buf.get_u32() as usize;
+        // Calculate the CRC32 checksum of the buffer
         let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);
         for _ in 0..num {
             let offset = buf.get_u32() as usize;
@@ -87,6 +133,7 @@ impl BlockMeta {
                 last_key,
             });
         }
+        // Verify the CRC32 checksum
         if buf.get_u32() != checksum {
             bail!("meta checksum mismatched");
         }
