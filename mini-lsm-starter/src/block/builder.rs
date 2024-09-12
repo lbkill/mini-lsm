@@ -54,6 +54,28 @@ impl BlockBuilder {
     }
 
     /// Adds a key-value pair to the block. Returns false when the block is full.
+    /// 举个例子：说明过程
+    /// 假设我们有两个键值对：
+    //
+    // 键1: "apple", 值1: "fruit".
+    // 键2: "apply", 值2: "growth".
+    // 通过前缀压缩，键 "apply" 和 "apple" 共享前缀 "appl"，所以存储时只会存储第二个键的不同部分。
+    /// +-------------------------------+
+    // | Offset #1 (2B)   = 0           | (第一个键值对的偏移量)
+    // | Offset #2 (2B)   = 14          | (第二个键值对的偏移量)
+    // +-------------------------------+
+    // | Key1 Overlap (2B) = 0          | (第一个键与自己没有重叠)
+    // | Key1 Length (2B)  = 5          | (键 "apple" 长度)
+    // | Key1 Content      = "apple"    |
+    // | Value1 Length (2B)= 5          | (值 "fruit" 长度)
+    // | Value1 Content    = "fruit"    |
+    // +-------------------------------+
+    // | Key2 Overlap (2B) = 4          | (键 "apply" 与 "apple" 的前缀重叠 4 字节)
+    // | Key2 Length (2B)  = 1          | (键 "apply" 不同部分长度 = 1)
+    // | Key2 Content      = "y"        |
+    // | Value2 Length (2B)= 6          | (值 "growth" 长度)
+    // | Value2 Content    = "growth"   |
+    // +-------------------------------+
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
