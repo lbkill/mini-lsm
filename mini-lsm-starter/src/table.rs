@@ -9,7 +9,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
@@ -207,7 +207,22 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        unimplemented!()
+        let len = file.size();
+        let raw_meta_offset = file.read(len - 4, 4)?;
+        let block_meta_offset = (&raw_meta_offset[..]).get_u32() as u64;
+        let raw_meta = file.read(block_meta_offset, len - 4 - block_meta_offset)?;
+        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
+        Ok(Self {
+            file,
+            first_key: block_meta.first().unwrap().first_key.clone(),
+            last_key: block_meta.last().unwrap().last_key.clone(),
+            bloom: None,
+            block_meta,
+            block_meta_offset: block_meta_offset as usize,
+            id,
+            block_cache,
+            max_ts: 0,
+        })
     }
 
     /// Create a mock SST with only first key + last key metadata
@@ -232,19 +247,41 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        // Get the offset of the block
+        let offset = self.block_meta[block_idx].offset;
+        // Get the offset of the next block
+        let offset_end = self
+            .block_meta
+            .get(block_idx + 1)
+            .map_or(self.block_meta_offset, |x| x.offset);
+        let block_data = self
+            .file
+            .read(offset as u64, (offset_end - offset) as u64)?;
+        Ok(Arc::new(Block::decode(&block_data[..])))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if let Some(ref block_cache) = self.block_cache {
+            let blk = block_cache
+                .try_get_with((self.id, block_idx), || self.read_block(block_idx))
+                .map_err(|e| anyhow!("{}", e))?;
+            Ok(blk)
+        } else {
+            self.read_block(block_idx)
+        }
     }
 
     /// Find the block that may contain `key`.
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        self.block_meta
+            // partition_point 是标准库提供的方法，用于在一个排序的序列中找到一个分割点，使得前面的元素都小于或等于给定条件，而后面的元素都大于给定条件。其时间复杂度为 O(log n)，适合在有序列表中进行二分查找。
+            // meta.first_key.as_key_slice() <= key 这个闭包用于比较块的第一个键 first_key 和目标键 key。它找到第一个块的 first_key 大于 key 的位置（即返回的 partition_point 是大于 key 的第一个位置）。
+            .partition_point(|meta| meta.first_key.as_key_slice() <= key)
+            // saturating_sub 是安全的减法操作，防止下溢出。它会尝试将结果减去 1，但如果结果为 0 或更小，它返回 0，而不会产生负数。这样可以避免块索引为负的情况。
+            .saturating_sub(1)
     }
 
     /// Get number of data blocks.
