@@ -25,6 +25,7 @@ impl<I: StorageIterator> PartialEq for HeapWrapper<I> {
 
 impl<I: StorageIterator> Eq for HeapWrapper<I> {}
 
+
 impl<I: StorageIterator> PartialOrd for HeapWrapper<I> {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
@@ -172,5 +173,17 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
         }
 
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.iters
+            .iter()
+            .map(|x| x.1.num_active_iterators())
+            .sum::<usize>()
+            +
+        self.current
+            .as_ref()
+            .map(|x| x.1.num_active_iterators())
+            .unwrap_or(0)
     }
 }

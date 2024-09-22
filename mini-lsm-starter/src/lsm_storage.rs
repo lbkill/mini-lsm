@@ -156,9 +156,83 @@ impl Drop for MiniLsm {
     }
 }
 
+// 这个 range_overlap 函数用于检查用户请求的键范围（user_begin 到 user_end）和某个表的键范围（table_begin 到 table_end）是否有重叠。
+// 函数通过比较这两个范围的边界，判断它们是否有交集，并返回布尔值（true 表示有重叠，false 表示没有重叠）。
+fn range_overlap (
+    user_begin: Bound<&[u8]>,
+    user_end: Bound<&[u8]>,
+    table_begin: KeySlice,
+    table_end: KeySlice,
+) -> bool {
+    match user_end {
+        Bound::Excluded(key) if key <= table_begin.raw_ref() => {
+            return false;
+        }
+        Bound::Included(key) if key < table_begin.raw_ref() => {
+            return false;
+        }
+        _ => {}
+    }
+    match user_begin {
+        Bound::Excluded(key) if key >= table_end.raw_ref() => {
+            return false;
+        }
+        Bound::Included(key) if key > table_end.raw_ref() => {
+            return false;
+        }
+        _ => {}
+    }
+    true
+}
+
+fn key_within(user_key: &[u8], table_begin: &[u8], table_end: &[u8]) -> bool {
+    table_begin <= user_key && user_key <= table_end
+}
+
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.inner.sync_dir()?;
+        self.compaction_notifier.send(()).ok();
+        self.flush_notifier.send(()).ok();
+
+        let mut compaction_thread = self.compaction_thread.lock();
+        if let Some(compaction_thread) = compaction_thread.take() {
+            compaction_thread
+                .join()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        }
+        let mut flush_thread = self.flush_thread.lock();
+        if let Some(flush_thread) = flush_thread.take() {
+            flush_thread
+                .join()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        }
+
+        if self.inner.options.enable_wal {
+            self.inner.sync()?;
+            self.inner.sync_dir()?;
+            return Ok(());
+        }
+
+        // create memtable and skip updating manifest
+        if !self.inner.state.read().memtable.is_empty() {
+            self.inner
+                .freeze_memtable_with_memtable(Arc::new(MemTable::create(
+                    self.inner.next_sst_id(),
+                )))?;
+        }
+
+        // 使用 while 循环是为了确保所有的不可变内存表都被处理完毕，保证数据的安全性和完整性。
+        // 在系统关闭之前，必须确保所有内存中的数据都被正确刷到磁盘上，以避免数据丢失。
+        while {
+            let snapshot = self.inner.state.read();
+            !snapshot.imm_memtables.is_empty()
+        } {
+            self.inner.force_flush_next_imm_memtable()?;
+        }
+        self.inner.sync_dir()?;
+
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -414,6 +488,22 @@ impl LsmStorageInner {
         unimplemented!()
     }
 
+    fn freeze_memtable_with_memtable(&self, memtable: Arc<MemTable>) -> Result<()> {
+        let mut guard = self.state.write();
+        // Swap the current memtable with a new one.
+        let mut snapshot = guard.as_ref().clone();
+        let old_memtable = std::mem::replace(&mut snapshot.memtable, memtable);
+        // Add the memtable to the immutable memtables.
+        snapshot.imm_memtables.insert(0, old_memtable.clone());
+        // Update the snapshot.
+        *guard = Arc::new(snapshot);
+
+        drop(guard);
+        old_memtable.sync_wal()?;
+
+        Ok(())
+    }
+
     /// Force freeze the current memtable to an immutable memtable
     /// 该方法的核心功能是将当前的可变内存表（memtable）冻结，并且用一个新的内存表替换它。
     /// 旧的内存表被插入到不可变内存表（imm_memtables）中，表明它已经准备好进行下一步处理（例如持久化或合并）。
@@ -514,19 +604,31 @@ impl LsmStorageInner {
         let mut table_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for table_id in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables[table_id].clone();
-            let iter = match _lower {
-                Bound::Included(key) => SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?,
-                Bound::Excluded(key) => {
-                    let mut iter = SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?;
-                    if iter.is_valid() && iter.key().raw_ref() == key {
-                        iter.next()?;
+            if range_overlap (
+                _lower,
+                _upper,
+                table.first_key().as_key_slice(),
+                table.last_key().as_key_slice(),
+            ) {
+                let iter = match _lower {
+                    Bound::Included(key) => {
+                        SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?
                     }
-                    iter
-                }
-                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
-            };
+                    Bound::Excluded(key) => {
+                        let mut iter = SsTableIterator::create_and_seek_to_key(
+                            table,
+                            KeySlice::from_slice(key),
+                        )?;
+                        if iter.is_valid() && iter.key().raw_ref() == key {
+                            iter.next()?;
+                        }
+                        iter
+                    }
+                    Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
+                };
 
-            table_iters.push(Box::new(iter));
+                table_iters.push(Box::new(iter));
+            }
         }
 
         let table_iter = MergeIterator::create(table_iters);
