@@ -185,8 +185,8 @@ fn range_overlap (
     true
 }
 
-fn key_within(user_key: &[u8], table_begin: &[u8], table_end: &[u8]) -> bool {
-    table_begin <= user_key && user_key <= table_end
+fn key_within(user_key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
+    table_begin.raw_ref() <= user_key && user_key <= table_end.raw_ref()
 }
 
 impl MiniLsm {
@@ -386,11 +386,32 @@ impl LsmStorageInner {
         }
 
         let mut iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        // 在 L0 SSTables 中查找, 优先是使用 bloom filter 进行过滤
+        let keep_table = |key: &[u8], table: &SsTable| {
+            if key_within(
+                key,
+                table.first_key().as_key_slice(),
+                table.last_key().as_key_slice(),
+            ) {
+                if let Some(bloom) = &table.bloom {
+                    if bloom.may_contain(farmhash::fingerprint32(key)) {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+            false
+        };
+
         for table in snapshot.l0_sstables.iter() {
-            iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
-                snapshot.sstables[table].clone(),
-                KeySlice::from_slice(_key),
-            )?));
+            let table = snapshot.sstables[table].clone();
+            if keep_table(_key, &table) {
+                iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                    table,
+                    KeySlice::from_slice(_key),
+                )?));
+            }
         }
         let iter = MergeIterator::create(iters);
         if iter.is_valid() && iter.key() == KeySlice::from_slice(_key) && !iter.value().is_empty() {

@@ -9,6 +9,7 @@ use bytes::BufMut;
 use super::{BlockMeta, FileObject, SsTable};
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 use crate::key::KeyVec;
+use crate::table::bloom::Bloom;
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
@@ -18,6 +19,8 @@ pub struct SsTableBuilder {
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
+    // 用于存储每个 key 的 hash 值
+    key_hashes: Vec<u32>,
 }
 
 impl SsTableBuilder {
@@ -30,6 +33,7 @@ impl SsTableBuilder {
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
+            key_hashes: Vec::new(),
         }
     }
 
@@ -42,6 +46,9 @@ impl SsTableBuilder {
         if self.first_key.is_empty() {
             self.first_key.set_from_slice(key);
         }
+
+        // 计算 key 的 hash 值，并将其添加到 key_hashes 中
+        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
 
         // if the current block can hold the key-value pair, add it to the block
         if self.builder.add(key, value) {
@@ -94,6 +101,15 @@ impl SsTableBuilder {
         BlockMeta::encode_block_meta(&self.meta, &mut buf);
         // 将 SSTable 的元信息的偏移量（meta_offset）写入 SSTable 的文件头部。
         buf.put_u32(meta_offset as u32);
+        // 根据 SSTable 的 key_hashes 字段构建一个 Bloom 过滤器。
+        let bloom = Bloom::build_from_key_hashes(
+            &self.key_hashes,
+            Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01),
+        );
+        // 将 Bloom 过滤器编码后，追加到 SSTable 的 data 字段中。
+        let bloom_offset = buf.len();
+        bloom.encode(&mut buf);
+        buf.put_u32(bloom_offset as u32);
         // 创建一个 FileObject 对象，将 SSTable 的数据写入到文件中。
         let file = FileObject::create(path.as_ref(), buf)?;
         Ok(SsTable {
@@ -101,7 +117,7 @@ impl SsTableBuilder {
             file,
             first_key: self.meta.first().unwrap().first_key.clone(),
             last_key: self.meta.last().unwrap().last_key.clone(),
-            bloom: None,
+            bloom: Some(bloom),
             block_meta: self.meta,
             block_meta_offset: meta_offset,
             block_cache,
